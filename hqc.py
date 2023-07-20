@@ -26,8 +26,6 @@ class RepeatedReedMullerForHQC():
     ])
 
     def __init__(self, multiplicity):
-        assert multiplicity % 2 == 1
-
         self.q = 2
         self.k = 8
         self.n = 128 * multiplicity
@@ -50,7 +48,6 @@ class RepeatedReedMullerForHQC():
         return vector(chain(*repeated_encoded))
 
     def decode(self, noisy_codeword):
-
         min_distance = self.n
         decoded_m = None
         for m in range(2**8):
@@ -95,6 +92,16 @@ class ReedSolomonForHQC():
             error_vector[i] = v
         return self.polynomial_ring(error_vector)
 
+    def encode_binary(self, binary_message):
+        assert len(binary_message) == self.k * 8
+
+        message = [self.base_field(binary_message[i * 8 : (i + 1) * 8]) for i in range(self.k)]
+        encoded = self.encode(message)
+
+        encoded_binary = chain(*[list(v) for v in encoded])
+        return vector(GF(2), encoded_binary)
+
+
     def encode(self, message):
         '''
         message should be list of coefficients
@@ -114,7 +121,7 @@ class ReedSolomonForHQC():
         last_connection = 1
         k = 1
 
-        for s_n, n in enumerate(s):
+        for n, s_n in enumerate(s):
             d = s_n + sum(connection[i]*s[n - i] for i in range(1, connection.degree() + 1))
             if d == 0:
                 k += 1
@@ -130,38 +137,79 @@ class ReedSolomonForHQC():
 
         return connection
 
+    def decode_binary(self, noisy_binary_codeword):
+        assert len(noisy_binary_codeword) == self.n * 8
+
+        noisy_codeword = [self.base_field(noisy_binary_codeword[i * 8 : (i + 1) * 8])
+                            for i in range(self.n)]
+
+        decoded = self.decode(self.polynomial_ring(noisy_codeword))
+
+        decoded_binary = chain(*[list(v) for v in decoded])
+        return vector(GF(2), decoded_binary)
 
     def decode(self, noisy_codeword):
         alpha = self.base_field.primitive_element()
 
         syndromes = [noisy_codeword(alpha**i) for i in range(1, 2*self.delta + 1)]
 
-        # return syndromes
         error_location_polynomial = self.berlekamp_massey(syndromes)
 
         alpha_log_table = {alpha**i: i for i in range(1, self.n + 1)}
 
         error_positions = []
+        error_betas = []
         for element in self.base_field:
             if error_location_polynomial(element) == 0:
                 # element is a root
                 error_pos = alpha_log_table[element.inverse()]
                 error_positions.append(error_pos)
+                error_betas.append(element.inverse())
 
-        return error_positions
+        beta_matrix = matrix(GF(self.q), [
+            [beta**i for beta in error_betas] for i in range(1, 2*self.delta + 1)
+        ])
+
+        # TODO: Handle decoding failures
+
+        error_values = beta_matrix.solve_right(vector(syndromes))
+
+        error = self.polynomial_ring(sum(e * self.x**i for i, e in zip(error_positions, error_values)))
+
+        codeword_polynomial = noisy_codeword - error
+        return self.polynomial_ring(list(codeword_polynomial)[-self.k:])
+
 
 class RMRSCodeForHQC():
 
-    def __init__(self, rs_n, rs_k, rm_multiplicity):
+    def __init__(self, rs_n, rs_k, rm_multiplicity, n=None):
         self.rs_code = ReedSolomonForHQC(rs_n, rs_k)
-        self.rm_code = ReedSolomonForHQC(rm_multiplicity)
+        self.rm_code = RepeatedReedMullerForHQC(rm_multiplicity)
 
-    def encode(self, message):
-        assert len(message) == self.rs_code.k
+        if n == None:
+            self.padding_length = 0
+        else:
+            self.padding_length = n - self.rm_code.n * self.rs_code.n
 
-        rs_codeword = self.rs_code.encode(message)
+    def encode(self, binary_message):
+        rs_codeword = self.rs_code.encode_binary(binary_message)
 
-        return rs_codeword
+        rm_messages = [rs_codeword[i * 8 : (i + 1) * 8] for i in range(self.rs_code.n)]
+        rm_codewords = [self.rm_code.encode(m) for m in rm_messages]
+
+        # return vector(GF(2), chain(*rm_codewords)), rm_messages, rm_codewords
+
+        return vector(GF(2), chain(*rm_codewords, [0] * self.padding_length))
+
+    def decode(self, noisy_codeword):
+        # By the way rm_noisy_codewords is defined, the padding is naturally removed
+        rm_noisy_codewords = [noisy_codeword[i * self.rm_code.n : (i + 1) * self.rm_code.n]
+                                for i in range(self.rs_code.n)]
+        rm_codewords = [self.rm_code.decode(c) for c in rm_noisy_codewords]
+
+        rs_noisy_codeword = vector(chain(*rm_codewords))
+
+        return self.rs_code.decode_binary(rs_noisy_codeword)
 
 @dataclass
 class HQCParameters:
@@ -194,6 +242,11 @@ class HQC():
 
         self.params = self.SecurityParameters[security_level]
 
+        self.rmrs = RMRSCodeForHQC(rs_n=self.params.n1,
+                                   rs_k=self.params.k // 8,
+                                   rm_multiplicity=self.params.multiplicity,
+                                   n=self.params.n)
+
     def generate_binary_vector_of_fixed_weight(self, weight):
         support = sample(range(self.params.n), weight)
         v = zero_vector(GF(2), self.params.n)
@@ -222,18 +275,13 @@ class HQC():
         r_1 = self.generate_binary_vector_of_fixed_weight(self.params.w_r)
         r_2 = self.generate_binary_vector_of_fixed_weight(self.params.w_r)
         u = r_1 + self.vector_product(h, r_2)
-        v = self.vector_product(s, r_2) + e
+        v = self.rmrs.encode(message) + self.vector_product(s, r_2) + e
 
         return (u, v)
 
+    def decrypt(self, sk, ciphertext):
+        u, v = ciphertext
+        x, y = sk
+        c_prime = v - self.vector_product(u, y)
 
-
-    def decrypt():
-        pass
-
-    # 128 [9, 69, 153, 116, 176, 117, 111, 75, 73, 233, 242, 233, 65, 210, 21, 139, 103, 173, 67, 118, 105, 210, 174, 110, 74, 69, 228, 82, 255, 181, 1]
-    # 192 [45, 216, 239, 24, 253, 104, 27, 40, 107, 50, 163, 210, 227, 134, 224, 158, 119, 13, 158, 1, 238, 164, 82, 43, 15, 232, 246, 142, 50, 189, 29, 232, 1]
-    # 256 [49, 167, 49, 39, 200, 121, 124, 91, 240, 63, 148, 71, 150, 123, 87, 101, 32, 215, 159, 71, 201, 115, 97, 210, 186, 183, 141, 217, 123, 12, 31, 243, 180, 219, 152, 239, 99, 141, 4, 246, 191, 144, 8, 232, 47, 27, 141, 178, 130, 64, 124, 47, 39, 188, 216, 48, 199, 187, 1]
-
-
-
+        return self.rmrs.decode(c_prime)
