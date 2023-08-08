@@ -7,18 +7,95 @@ from Crypto.Hash import SHA3_512 as HASH_G
 from Crypto.Hash import SHAKE256 as XOF_H
 from Crypto.Random import get_random_bytes
 
+def mod_centered(v, modulo):
+    v = v % modulo
+    if v <= modulo//2:
+        return v
+    return - (modulo - v)
 
 class PolynomialVector():
 
-    def __init__(self, module, poly_vec_coefficients):
-        self.base_module = module
+    def __init__(self, module, poly_vec_coefficients, in_ntt_domain=False):
         assert all(len(p) == module.n for p in poly_vec_coefficients)
-        self.poly_vec = [vector(module, p) for p in poly_vec_coefficients]
+        self.module = module
+        self.poly_vec = [vector(module.field, p) for p in poly_vec_coefficients]
+        self.in_ntt_domain = in_ntt_domain
 
-    def __add__(self, that_poly_vec):
+    def test_compatibility_of_domains(self, poly_vec2):
+        # assert self.module.field == poly_vec2.module
+        assert self.in_ntt_domain == poly_vec2.in_ntt_domain
 
+    def __add__(self, poly_vec2):
+        self.test_compatibility_of_domains(poly_vec2)
+        sum_poly_vec = [v1 + v2 for v1, v2 in zip(self.poly_vec, poly_vec2.poly_vec)]
+        return PolynomialVector(self.module, sum_poly_vec)
 
+    def __sub__(self, poly_vec2):
+        self.test_compatibility_of_domains(poly_vec2)
+        sum_poly_vec = [v1 - v2 for v1, v2 in zip(self.poly_vec, poly_vec2.poly_vec)]
+        return PolynomialVector(self.module, sum_poly_vec)
 
+    def __neg__(self):
+        return PolynomialVector(self.module, [-p for p in self.poly_vec])
+
+    def __iter__(self):
+        return iter(self.poly_vec)
+
+    def _multiply_poly_vecs(self, poly_vec2):
+        self.test_compatibility_of_domains(poly_vec2)
+
+        if (self.in_ntt_domain == True):
+            prod = sum(self.module.poly_product_ntt_domain(p1, p2)
+                       for p1, p2 in zip(self, poly_vec2))
+            return prod
+
+        else:
+            raise NotImplementedError
+
+    def _multiply_poly_vec_and_poly(self, poly):
+        assert self.in_ntt_domain
+
+        prod = [self.module.poly_product_ntt_domain(poly, p) for p in self]
+        return PolynomialVector(self.module, prod, in_ntt_domain=True)
+
+    def _multiply_poly_vec_by_scalar(self, field_element):
+        return PolynomialVector(self.module, [p * field_element for p in self], self.in_ntt_domain)
+
+    def __mul__(self, poly_or_poly_vec_or_int):
+        if isinstance(poly_or_poly_vec_or_int, PolynomialVector):
+            return self._multiply_poly_vecs(poly_or_poly_vec_or_int)
+        elif poly_or_poly_vec_or_int in self.module.field:
+            return self._multiply_poly_vec_by_scalar(poly_or_poly_vec_or_int)
+        else:
+            return self._multiply_poly_vec_and_poly(poly_or_poly_vec_or_int)
+
+    def ntt(self):
+        poly_vec_ntt = [self.module.ntt_polynomial(p) for p in self]
+        return PolynomialVector(self.module, poly_vec_ntt, in_ntt_domain=True)
+
+    def inv_ntt(self):
+        poly_vec = [self.module.inv_ntt_polynomial(p) for p in self]
+        return PolynomialVector(self.module, poly_vec, in_ntt_domain=False)
+
+    def __repr__(self):
+        return str(self.poly_vec)
+
+    def as_bytes(self):
+        out = b''
+        n_bytes = ceil(log(self.module.field.order(), 2**8))
+        for poly in self:
+            out += b''.join(int(c).to_bytes(n_bytes) for c in poly)
+        return out
+
+    def norm_infinity(self):
+        def abs_value(x):
+            return mod_centered(int(x), self.module.field.order())
+        return max(abs_value(i) for p in self for i in p)
+
+    def __eq__(self, other):
+        if not isinstance(other, PolynomialVector):
+            return False
+        return all(a == b for a, b in zip(self, other))
 
 
 class DilithiumModule():
@@ -64,42 +141,6 @@ class DilithiumModule():
         return sum(self.poly_product_ntt_domain(poly_a, poly_b)
                    for poly_a, poly_b in zip(poly_vec_a_hat, poly_vec_b_hat))
 
-    def matrix_vector_product_ntt_domain(self, matrix, poly_vec):
-        return [self.dot_product_ntt_domain(poly_vec_row, poly_vec) for poly_vec_row in matrix]
-
-    def ntt(self, poly_vector):
-        return [self.ntt_polynomial(v) for v in poly_vector]
-
-    def inv_ntt(self, poly_vector_hat):
-        return [self.inv_ntt_polynomial(v) for v in poly_vector_hat]
-
-    def poly_vector_sum(self, poly_vec_a, poly_vec_b):
-        return [vector(self.field, poly_a) + vector(self.field, poly_b)
-                for poly_a, poly_b in zip(poly_vec_a, poly_vec_b)]
-
-    def poly_vector_sub(self, poly_vec_a, poly_vec_b):
-        return [vector(self.field, poly_a) - vector(self.field, poly_b)
-                for poly_a, poly_b in zip(poly_vec_a, poly_vec_b)]
-
-    def poly_vector_as_bytes(self, poly_vec):
-        out = b''
-        n_bytes = ceil(log(self.field.order(), 2**8))
-        for poly in poly_vec:
-            out += b''.join(int(c).to_bytes(n_bytes) for c in poly)
-        return out
-
-    def poly_vector_poly_product_ntt_domain(self, poly_vec, poly):
-        return [self.poly_product_ntt_domain(p, poly) for p in poly_vec]
-
-    def poly_vector_poly_product_ntt_domain_to_normal(self, poly_vec, poly):
-        ntt_prod = poly_vector_poly_product_ntt_domain(poly_vec, poly)
-        return self.inv_ntt(ntt_prod)
-
-    def norm_infinity(self, poly_vec):
-        return max(abs(c) for c in poly for poly in poly_vector)
-
-    def minus(self, poly_vec):
-        return [-vector(self.field, p) for p in poly_vec]
 
 @dataclass
 class DilithiumParameters:
@@ -138,8 +179,6 @@ class Dilithium():
         assert(security_level in self.SecurityParameters)
 
         self.params = self.SecurityParameters[security_level]
-
-        self.F = GF(self.params.q)
         self.module = DilithiumModule()
 
     def gen_uniformly_random_polynomial_with_xof(self, rho, j, i):
@@ -161,7 +200,7 @@ class Dilithium():
                 hat_a[k] = d2
                 k += 1
 
-        return vector(self.F, hat_a)
+        return vector(self.module.field, hat_a)
 
     def get_ntt_A_from_seed(self, rho):
         ntt_A = [[None] * self.params.k for _ in range(self.params.k)]
@@ -169,7 +208,7 @@ class Dilithium():
             for j in range(self.params.l):
                 ntt_A[i][j] = self.gen_uniformly_random_polynomial_with_xof(rho, j, i)
 
-        return ntt_A
+        return [PolynomialVector(self.module, vec_A, in_ntt_domain=True) for vec_A in ntt_A]
 
     def mod_centered(self, v, modulo):
         v = v % modulo
@@ -186,13 +225,12 @@ class Dilithium():
 
         poly_vector0 = [[] for _ in poly_vector]
         poly_vector1 = [[] for _ in poly_vector]
-        for poly in poly_vector:
+        for i, poly in enumerate(poly_vector):
             for r in poly:
                 r1, r0 = power2round(r, d)
-                poly_vector0[-1].append(r0)
-                poly_vector1[-1].append(r1)
-
-        return poly_vector1, poly_vector0
+                poly_vector0[i].append(r0)
+                poly_vector1[i].append(r1)
+        return PolynomialVector(self.module, poly_vector1), PolynomialVector(self.module, poly_vector0)
 
     def expand_S(self, rho_prime):
         # shake256 = SHAKE256.new(rho_prime)
@@ -208,7 +246,11 @@ class Dilithium():
             for j in range(self.params.n):
                 s_2[i].append(randint(-self.params.eta, self.params.eta))
 
-        return s_1, s_2
+        return PolynomialVector(self.module, s_1), PolynomialVector(self.module, s_2)
+
+    def matrix_poly_vec_product(self, ntt_matrix, poly_vec):
+        return PolynomialVector(self.module, [ntt_vec * poly_vec for ntt_vec in ntt_matrix],
+                                in_ntt_domain=True)
 
     def keygen(self):
         zeta = get_random_bytes(32)
@@ -219,13 +261,13 @@ class Dilithium():
 
         ntt_A = self.get_ntt_A_from_seed(rho)
         s1, s2 = self.expand_S(rho_prime)
-        ntt_s1 = self.module.ntt(s1)
+        ntt_s1 = s1.ntt()
 
-        ntt_A_times_s1 = self.module.matrix_vector_product_ntt_domain(ntt_A, ntt_s1)
-        t = self.module.poly_vector_sum(self.module.inv_ntt(ntt_A_times_s1), s2)
+        t = self.matrix_poly_vec_product(ntt_A, ntt_s1).inv_ntt() + s2
         t1, t0 = self.power2round_poly_vector(t, self.params.d)
-        tr = self.hash_H(rho + self.module.poly_vector_as_bytes(t1), 32)
+        tr = self.hash_H(rho + t1.as_bytes(), 32)
 
+        assert (t1 * 2**self.params.d == t - t0)
         return (rho, t1), (rho, K, tr, s1, s2, t0)
 
     def hash_H(self, seed_bytes, n_bytes):
@@ -261,7 +303,7 @@ class Dilithium():
     def low_bits_coefficient(self, r, alpha):
         return self.decompose(r, alpha)[1]
 
-    def use_hint_coefficient(h, r, alpha):
+    def use_hint_coefficient(self, h, r, alpha):
         m = (self.params.q - 1) // alpha
         (r1, r0) = self.decompose(r, alpha)
         if h and r0 > 0:
@@ -270,67 +312,112 @@ class Dilithium():
             return (r1 - 1) % m
         return r1
 
+    def to_poly_vec(self, poly_vec):
+        return PolynomialVector(self.module, poly_vec)
+
     def high_bits(self, r, alpha):
-        return [[self.high_bits_coefficient(c, alpha) for c in poly] for poly in r]
+        v = [[self.high_bits_coefficient(c, alpha) for c in poly] for poly in r]
+        return self.to_poly_vec(v)
 
     def low_bits(self, r, alpha):
-        return [[self.low_bits_coefficient(c, alpha) for c in poly] for poly in r]
+        v = [[self.low_bits_coefficient(c, alpha) for c in poly] for poly in r]
+        return self.to_poly_vec(v)
 
     def make_hint(self, z, r, alpha):
-        return [[self.make_hint_coefficient(c_z, c_r, alpha) for c_z, c_r in zip(poly_z, poly_r)]
+        v = [[self.make_hint_coefficient(c_z, c_r, alpha) for c_z, c_r in zip(poly_z, poly_r)]
                 for poly_z, poly_r in zip(z, r)]
+        return self.to_poly_vec(v)
 
     def use_hint(self, h, r, alpha):
-        return [[self.use_hint_coefficient(c_h, c_r, alpha) for c_h, c_r in zip(poly_h, poly_r)]
-                for poly_h, poly_r in zip(h, r)]
+        v = [[self.use_hint_coefficient(c_h, c_r, alpha) for c_h, c_r in zip(poly_h, poly_r)]
+              for poly_h, poly_r in zip(h, r)]
+        return self.to_poly_vec(v)
 
+    def expand_mask(self, rhoprime, kappa):
+        xof = SHAKE256.new(rhoprime + kappa)
+        n_bytes = ceil(log(2 * self.params.gamma1, 2**8))
+        assert is_power_of_two(self.params.gamma1)
 
+        y = [[] for _ in range(self.params.l)]
+        for i in range(self.params.l):
+            for j in range(self.params.n):
+                value = int.from_bytes(xof.read(n_bytes)) % (2 * self.params.gamma1)
+                y[i].append(value - self.params.gamma1)
 
+        return PolynomialVector(self.module, y)
 
-    def sign(sk, message_bytes):
+    def sign(self, sk, message_bytes):
         (rho, K, tr, s1, s2, t0) = sk
 
         ntt_A = self.get_ntt_A_from_seed(rho)
-        mu = self.hash_H(tr + M)
+        mu = self.hash_H(tr + message_bytes, 64)
+
+        print(f'{mu=}')
         kappa = 0
         rho_prime = get_random_bytes(64)
 
+        s1_ntt = s1.ntt()
+        s2_ntt = s2.ntt()
+        t0_ntt = t0.ntt()
+
         (z, h) = (None, None)
         while (z, h) == (None, None):
-            y = self.expand_mask(rho_prime, kappa)
-            ntt_y = self.module.ntt(y)
-            w = self.module.matrix_vector_product_ntt_domain(ntt_A, ntt_y)
+            y = self.expand_mask(rho_prime, kappa.to_bytes(32))
+            y_ntt = y.ntt()
+            w = self.matrix_poly_vec_product(ntt_A, y_ntt).inv_ntt()
             w1 = self.high_bits(w, 2 * self.params.gamma2)
 
-            c_tilde = self.hash_H(mu + self.module.poly_vector_as_bytes(w1))
+            c_tilde = self.hash_H(mu + w1.as_bytes(), 32)
             c = self.sample_in_ball(c_tilde)
-            hat_c = self.module.ntt_polynomial(c)
-            c_s1_hat = self.module.poly_vector_poly_product_ntt_domain(s1, hat_c)
-            z = self.module.poly_vector_sum(y, self.module.inv_ntt(c_s1_hat))
-
-            z_norm_condition = (self.module.norm_infinity(z) >=
-                                self.params.gamma_1 - self.params.beta)
-            r0_norm_condition = (self.module.norm_infinity(r0) >=
-                                 self.params.gamma_2 - self.params.beta)
+            c_ntt = self.module.ntt_polynomial(c)
+            z = y + (s1_ntt * c_ntt).inv_ntt()
+            r0 = self.low_bits(w - (s2_ntt * c_ntt).inv_ntt(), 2 * self.params.gamma2)
+            z_norm_condition = (z.norm_infinity() >= self.params.gamma1 - self.params.beta)
+            r0_norm_condition = (r0.norm_infinity() >= self.params.gamma2 - self.params.beta)
 
             if z_norm_condition or r0_norm_condition:
                 (z, h) = (None, None)
+
             else:
-                ct0 = self.module.poly_vector_poly_product_ntt_domain_to_normal(t0, hat_c)
-                cs2 = self.module.poly_vector_poly_product_ntt_domain_to_normal(s2, hat_c)
+                ct0 = (t0_ntt * c_ntt).inv_ntt()
+                cs2 = (s2_ntt * c_ntt).inv_ntt()
+                h = self.make_hint(-ct0, w - cs2 + ct0, 2 * self.params.gamma2)
 
-                h = self.make_hint(self.module.poly_vector_sub(ct0, w - cs2), 2 * self.params.gamma2)
-
-
+                n_ones_in_h = sum(p.hamming_weight() for p in h)
+                if ct0.norm_infinity() >= self.params.gamma2 or n_ones_in_h > self.params.omega:
+                    (z, h) = (None, None)
             kappa += self.params.l
 
+        assert(self.use_hint(h, w - cs2 + ct0, 2 * self.params.gamma2) == w1)
+
+        print(f'{w1 = }')
         return (c_tilde, z, h)
 
-    def verify(pk, message_bytes, signature):
+    def verify(self, pk, message_bytes, signature):
         (rho, t1) = pk
         (c_tilde, z, h) = signature
 
         ntt_A = self.get_ntt_A_from_seed(rho)
+        mu = self.hash_H(self.hash_H(rho + t1.as_bytes(), 32) + message_bytes, 64)
+        print(f'{mu=}')
+        c = self.sample_in_ball(c_tilde)
 
+        z_ntt = z.ntt()
+        c_ntt = self.module.ntt_polynomial(c)
+        t1_ntt = t1.ntt()
+
+        r = self.matrix_poly_vec_product(ntt_A, z_ntt) - ((t1_ntt * c_ntt) * (2**self.params.d))
+        w1 = self.use_hint(h, r.inv_ntt(), 2 * self.params.gamma2)
+
+        if (z.norm_infinity() >= self.params.gamma1 - self.params.beta):
+            return False
+
+        if (c_tilde != self.hash_H(mu + w1.as_bytes(), 32)):
+            return False
+
+        if sum(p.hamming_weight() for p in h) > self.params.omega:
+            return False
+
+        return True
 
 dilithium = Dilithium(2)
