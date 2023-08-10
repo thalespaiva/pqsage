@@ -7,11 +7,49 @@ from Crypto.Hash import SHA3_512 as HASH_G
 from Crypto.Hash import SHAKE256 as PRF
 from Crypto.Random import get_random_bytes
 
+from crystals_common import PolynomialVector
+from crystals_common import ntt_leveled_negacyclic_256
+from crystals_common import inv_ntt_leveled_negacyclic_256
+from crystals_common import bit_rev
+
 
 def int_to_bits(a, length):
     str_bits = bin(a)[2:]
     padding_length = length - len(str_bits)
     return [int(b) for b in reversed(str_bits)] + [0] * padding_length
+
+
+class KyberNTTRing():
+
+    def __init__(self):
+        self.field = GF(3329)
+        self.n = 256
+        self.omega_n = self.field(17)
+        self.polynomial_ring = PolynomialRing(self.field, 'x')
+        self.x = self.polynomial_ring.gen()
+
+    def ntt(self, a):
+        return ntt_leveled_negacyclic_256(a, self.field, self.omega_n, 7)
+
+    def inv_ntt(self, a_hat):
+        return inv_ntt_leveled_negacyclic_256(a_hat, self.field, self.omega_n, 7)
+
+    def poly_product_ntt_domain(self, a_hat, b_hat):
+
+        prod = [None] * 256
+        for i in range(0, 256, 2):
+            pa = a_hat[i + 1]*self.x + a_hat[i]
+            pb = b_hat[i + 1]*self.x + b_hat[i]
+
+            pol_prod = (pa * pb).mod(self.x**2 - self.omega_n**(2*bit_rev(i//2, 7) + 1))
+            prod[i + 1] = pol_prod[1]
+            prod[i] = pol_prod[0]
+
+        return vector(self.field, prod)
+
+    def dot_product_ntt_domain(self, poly_vec_a_hat, poly_vec_b_hat):
+        return sum(self.poly_product_ntt_domain(poly_a, poly_b)
+                   for poly_a, poly_b in zip(poly_vec_a_hat, poly_vec_b_hat))
 
 @dataclass
 class KyberParameters:
@@ -43,31 +81,7 @@ class Kyber():
         assert(security_level in self.SecurityParameters)
 
         self.params = self.SecurityParameters[security_level]
-
-        self.F = GF(self.params.q)
-        self.polynomial_ring = PolynomialRing(self.F, 'x')
-        self.nth_root_unity = self.F(17)
-
-    def ntt(self, a):
-        a_hat = zero_vector(self.F, self.params.n)
-
-        a_poly = self.polynomial_ring(list(a))
-        for i in range(self.params.n):
-            a_hat[i] = a_poly(self.nth_root_unity**i)
-
-        return a_hat
-
-
-    def inv_ntt(self, a_hat):
-        a = zero_vector(self.F, self.params.n)
-
-        inv_n = self.F(self.params.n)**(-1)
-
-        a_hat_poly = self.polynomial_ring(list(a_hat))
-        for i in range(self.params.n):
-            a[i] = inv_n * a_hat_poly(self.nth_root_unity**(-i))
-
-        return a
+        self.ntt_ring = KyberNTTRing()
 
     def gen_uniformly_random_polynomial_with_xof(self, rho, j, i):
         seed_bytes = rho + int(j).to_bytes(1) + int(i).to_bytes(1)
@@ -88,7 +102,7 @@ class Kyber():
                 hat_a[k] = d2
                 k += 1
 
-        return vector(self.F, hat_a)
+        return vector(self.ntt_ring.field, hat_a)
 
     def get_ntt_A_from_seed(self, rho):
         ntt_A = [[None] * self.params.k for _ in range(self.params.k)]
@@ -96,7 +110,7 @@ class Kyber():
             for j in range(self.params.k):
                 ntt_A[i][j] = self.gen_uniformly_random_polynomial_with_xof(rho, j, i)
 
-        return ntt_A
+        return [PolynomialVector(self.ntt_ring, vec_A, in_ntt_domain=True) for vec_A in ntt_A]
 
     def get_ntt_A_transpose_from_seed(self, rho):
         ntt_A = [[None] * self.params.k for _ in range(self.params.k)]
@@ -104,7 +118,7 @@ class Kyber():
             for j in range(self.params.k):
                 ntt_A[i][j] = self.gen_uniformly_random_polynomial_with_xof(rho, i, j)
 
-        return ntt_A
+        return [PolynomialVector(self.ntt_ring, vec_A, in_ntt_domain=True) for vec_A in ntt_A]
 
     def bytes_to_bits(self, byte_array):
         bits = []
@@ -126,47 +140,26 @@ class Kyber():
             f.append(a - b)
         return f
 
+    def to_poly_vec(self, poly_vec):
+        return PolynomialVector(self.ntt_ring, poly_vec)
+
     def sample_polynomial_with_centered_binomial(self, eta, seed, base_counter):
         seed_counter_bytes = seed + int(base_counter).to_bytes(1)
         poly_coeffs = self.centered_binomial_distribution(eta, seed_counter_bytes)
-        return vector(self.F, poly_coeffs), 1
+        return vector(self.ntt_ring.field, poly_coeffs), 1
 
     def sample_vector_with_centered_binomial(self, eta, seed, base_counter):
         v = []
         for i in range(self.params.k):
             seed_counter_bytes = seed + int(base_counter + i).to_bytes(1)
             poly_coeffs = self.centered_binomial_distribution(eta, seed_counter_bytes)
-            v.append(vector(self.F, poly_coeffs))
-        return v, self.params.k
-
-    def ntt_polynomial_product(self, ntt_poly1, ntt_poly2):
-        return vector(self.F, [c1 * c2 for c1, c2 in zip(ntt_poly1, ntt_poly2)])
-
-    def ntt_vectors_product(self, ntt_vector1, ntt_vector2):
-        ntt_product = zero_vector(self.F, self.params.n)
-
-        for i in range(self.params.k):
-            ntt_product += self.ntt_polynomial_product(ntt_vector1[i], ntt_vector2[i])
-
-        return ntt_product
-
-    def ntt_matrix_ntt_vector_product(self, ntt_matrix, ntt_vector):
-        ntt_result = [[None] * self.params.k for _ in range(self.params.k)]
-
-        for i in range(self.params.k):
-            # print(self.ntt_vectors_product(ntt_matrix[i], ntt_vector))
-            ntt_result[i] = self.ntt_vectors_product(ntt_matrix[i], ntt_vector)
+            v.append(vector(self.ntt_ring.field, poly_coeffs))
+        return self.to_poly_vec(v), base_counter + self.params.k
 
 
-        return ntt_result
-
-    def vector_sum(self, vector1, vector2):
-        vector_sum = [None] * self.params.k
-
-        for i in range(self.params.k):
-            vector_sum[i] = vector1[i] + vector2[i]
-
-        return vector_sum
+    def matrix_poly_vec_product(self, ntt_matrix, poly_vec):
+        return PolynomialVector(self.ntt_ring, [ntt_vec * poly_vec for ntt_vec in ntt_matrix],
+                                in_ntt_domain=True)
 
     def keygen(self):
         d = get_random_bytes(32)
@@ -177,25 +170,17 @@ class Kyber():
         counter = 0
         s, counter = self.sample_vector_with_centered_binomial(self.params.eta1, sigma, counter)
         e, counter = self.sample_vector_with_centered_binomial(self.params.eta1, sigma, counter)
+        ntt_s = s.ntt()
+        ntt_e = e.ntt()
 
-        ntt_s = [self.ntt(s_i) for s_i in s]
-        ntt_e = [self.ntt(e_i) for e_i in e]
-
-        ntt_t = self.vector_sum(self.ntt_matrix_ntt_vector_product(ntt_A, ntt_s), ntt_e)
-
+        ntt_t = self.matrix_poly_vec_product(ntt_A, ntt_s) + ntt_e
         return (ntt_t, rho), (ntt_s)
-
-    def ntt_vector(self, vector):
-        return [self.ntt(v) for v in vector]
-
-    def inv_ntt_vector(self, vector):
-        return [self.inv_ntt(v) for v in vector]
 
     def compress(self, coefficients, d):
         return [self.compress_coefficient(c, d) for c in coefficients]
 
     def decompress(self, coefficients, d):
-        return vector(self.F, [self.decompress_coefficient(c, d) for c in coefficients])
+        return vector(self.ntt_ring.field, [self.decompress_coefficient(c, d) for c in coefficients])
 
     def compress_coefficient(self, x, d):
         return mod(round(2**d / self.params.q * int(x)), 2**d)
@@ -215,12 +200,11 @@ class Kyber():
                                                                 counter)
         e2, counter  = self.sample_polynomial_with_centered_binomial(self.params.eta1, randomness,
                                                                      counter)
-
-        ntt_r = self.ntt_vector(r)
-        u = self.inv_ntt_vector(self.ntt_matrix_ntt_vector_product(ntt_A_transpose, ntt_r) + e1)
+        ntt_r = r.ntt()
+        u = self.matrix_poly_vec_product(ntt_A_transpose, ntt_r).inv_ntt() + e1
 
         encoded_message = self.decompress(message, 1)
-        v = encoded_message + self.inv_ntt(self.ntt_vectors_product(ntt_t, ntt_r)) + e2
+        v = encoded_message + self.ntt_ring.inv_ntt(ntt_t * ntt_r) + e2
 
         u_compressed = [self.compress(u_i, self.params.du) for u_i in u]
         v_compressed = self.compress(v, self.params.dv)
@@ -230,11 +214,31 @@ class Kyber():
         ntt_s = sk
 
         u_compressed, v_compressed = ciphertext
-        u = [self.decompress(u_i, self.params.du) for u_i in u_compressed]
+        u = self.to_poly_vec([self.decompress(u_i, self.params.du) for u_i in u_compressed])
         v = self.decompress(v_compressed, self.params.dv)
 
-        ntt_u = kyber.ntt_vector(u)
-        noisy_message = v - self.inv_ntt(self.ntt_vectors_product(ntt_s, ntt_u))
+        ntt_u = u.ntt()
+        noisy_message = v - self.ntt_ring.inv_ntt(ntt_s * ntt_u)
 
-        return self.compress(noisy_message, 1)
+        return vector(self.compress(noisy_message, 1))
 
+
+def test_kyber():
+
+    for security_level in [128, 192, 256]:
+        kyber = Kyber(security_level)
+        message = random_vector(GF(2), 256).lift()
+        pk, sk = kyber.keygen()
+        randomness = get_random_bytes(32)
+        ciphertext1 = kyber.encrypt(pk, message, randomness)
+        decrypted = kyber.decrypt(sk, ciphertext1)
+        assert decrypted == message
+
+        ciphertext2 = kyber.encrypt(pk, message, randomness)
+        assert ciphertext1 == ciphertext2
+        randomness2 = get_random_bytes(32)
+        ciphertext3 = kyber.encrypt(pk, message, randomness2)
+
+        assert ciphertext1 != ciphertext3
+        print(f'Kyber {security_level}: PASSED')
+        print(f'message = {"".join(map(str, message))}')

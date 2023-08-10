@@ -7,96 +7,10 @@ from Crypto.Hash import SHA3_512 as HASH_G
 from Crypto.Hash import SHAKE256 as XOF_H
 from Crypto.Random import get_random_bytes
 
-def mod_centered(v, modulo):
-    v = v % modulo
-    if v <= modulo//2:
-        return v
-    return - (modulo - v)
-
-class PolynomialVector():
-
-    def __init__(self, ntt_ring, poly_vec_coefficients, in_ntt_domain=False):
-        assert all(len(p) == ntt_ring.n for p in poly_vec_coefficients)
-        self.ntt_ring = ntt_ring
-        self.poly_vec = [vector(ntt_ring.field, p) for p in poly_vec_coefficients]
-        self.in_ntt_domain = in_ntt_domain
-
-    def test_compatibility_of_domains(self, poly_vec2):
-        assert self.ntt_ring.field == poly_vec2.ntt_ring.field
-        assert self.in_ntt_domain == poly_vec2.in_ntt_domain
-
-    def __add__(self, poly_vec2):
-        self.test_compatibility_of_domains(poly_vec2)
-        sum_poly_vec = [v1 + v2 for v1, v2 in zip(self.poly_vec, poly_vec2.poly_vec)]
-        return PolynomialVector(self.ntt_ring, sum_poly_vec)
-
-    def __sub__(self, poly_vec2):
-        self.test_compatibility_of_domains(poly_vec2)
-        sum_poly_vec = [v1 - v2 for v1, v2 in zip(self.poly_vec, poly_vec2.poly_vec)]
-        return PolynomialVector(self.ntt_ring, sum_poly_vec)
-
-    def __neg__(self):
-        return PolynomialVector(self.ntt_ring, [-p for p in self.poly_vec])
-
-    def __iter__(self):
-        return iter(self.poly_vec)
-
-    def _multiply_poly_vecs(self, poly_vec2):
-        self.test_compatibility_of_domains(poly_vec2)
-
-        if (self.in_ntt_domain == True):
-            prod = sum(self.ntt_ring.poly_product_ntt_domain(p1, p2)
-                       for p1, p2 in zip(self, poly_vec2))
-            return prod
-
-        else:
-            raise NotImplementedError
-
-    def _multiply_poly_vec_and_poly(self, poly):
-        assert self.in_ntt_domain
-
-        prod = [self.ntt_ring.poly_product_ntt_domain(poly, p) for p in self]
-        return PolynomialVector(self.ntt_ring, prod, in_ntt_domain=True)
-
-    def _multiply_poly_vec_by_scalar(self, field_element):
-        return PolynomialVector(self.ntt_ring, [p * field_element for p in self], self.in_ntt_domain)
-
-    def __mul__(self, poly_or_poly_vec_or_int):
-        if isinstance(poly_or_poly_vec_or_int, PolynomialVector):
-            return self._multiply_poly_vecs(poly_or_poly_vec_or_int)
-        elif poly_or_poly_vec_or_int in self.ntt_ring.field:
-            return self._multiply_poly_vec_by_scalar(poly_or_poly_vec_or_int)
-        else:
-            return self._multiply_poly_vec_and_poly(poly_or_poly_vec_or_int)
-
-    def ntt(self):
-        poly_vec_ntt = [self.ntt_ring.ntt_polynomial(p) for p in self]
-        return PolynomialVector(self.ntt_ring, poly_vec_ntt, in_ntt_domain=True)
-
-    def inv_ntt(self):
-        poly_vec = [self.ntt_ring.inv_ntt_polynomial(p) for p in self]
-        return PolynomialVector(self.ntt_ring, poly_vec, in_ntt_domain=False)
-
-    def __repr__(self):
-        return str(self.poly_vec)
-
-    def as_bytes(self):
-        out = b''
-        n_bytes = ceil(log(self.ntt_ring.field.order(), 2**8))
-        for poly in self:
-            out += b''.join(int(c).to_bytes(n_bytes) for c in poly)
-        return out
-
-    def norm_infinity(self):
-        def abs_value(x):
-            return mod_centered(int(x), self.ntt_ring.field.order())
-        return max(abs_value(i) for p in self for i in p)
-
-    def __eq__(self, other):
-        if not isinstance(other, PolynomialVector):
-            return False
-        return all(a == b for a, b in zip(self, other))
-
+from crystals_common import PolynomialVector
+from crystals_common import mod_centered
+from crystals_common import ntt_leveled_negacyclic_256
+from crystals_common import inv_ntt_leveled_negacyclic_256
 
 class DilithiumNTTRing():
 
@@ -105,41 +19,14 @@ class DilithiumNTTRing():
         self.n = 256
         self.omega_2n = self.field(1753)
 
-    def bit_rev(self, x):
-        b = bin(x)[2:]
-        b = '0' * (8 - len(b)) + b
-        return int(''.join(reversed(b)), 2)
+    def ntt(self, a):
+        return ntt_leveled_negacyclic_256(a, self.field, self.omega_2n, 8)
 
-    def ntt_polynomial(self, a):
-        a_hat = copy(a)
-        for l in range(7, -1, -1):
-            for i in range(0, 2**(7 - l)):
-                phi = self.omega_2n ** self.bit_rev(2**(7 - l) + i)
-                for j in range(i * 2**(l + 1), i * 2**(l + 1) + 2**l):
-                    t0 = a_hat[j]
-                    t1 = phi * a_hat[j + 2**l]
-                    a_hat[j] = t0 + t1
-                    a_hat[j + 2**l] = t0 - t1
-        return a_hat
-
-    def inv_ntt_polynomial(self, a_hat):
-        a = copy(a_hat)
-        for l in range(8):
-            for i in range(2**(7 - l)):
-                phi = self.omega_2n ** -self.bit_rev(2**(7 - l) + i)
-                for j in range(i * 2**(l + 1), i * 2**(l + 1) + 2**l):
-                    t0 = a[j] + a[j + 2**l]
-                    t1 = a[j] - a[j + 2**l]
-                    a[j] = t0
-                    a[j + 2**l] = phi * t1
-        return vector(self.field, a) * self.field(self.n)**-1
+    def inv_ntt(self, a_hat):
+        return inv_ntt_leveled_negacyclic_256(a_hat, self.field, self.omega_2n, 8)
 
     def poly_product_ntt_domain(self, a_hat, b_hat):
         return vector(self.field, [c_a * c_b for c_a, c_b in zip(a_hat, b_hat)])
-
-    def dot_product_ntt_domain(self, poly_vec_a_hat, poly_vec_b_hat):
-        return sum(self.poly_product_ntt_domain(poly_a, poly_b)
-                   for poly_a, poly_b in zip(poly_vec_a_hat, poly_vec_b_hat))
 
 
 @dataclass
@@ -203,24 +90,18 @@ class Dilithium():
         return vector(self.ntt_ring.field, hat_a)
 
     def get_ntt_A_from_seed(self, rho):
-        ntt_A = [[None] * self.params.k for _ in range(self.params.k)]
+        ntt_A = [[None] * self.params.l for _ in range(self.params.k)]
         for i in range(self.params.k):
             for j in range(self.params.l):
                 ntt_A[i][j] = self.gen_uniformly_random_polynomial_with_xof(rho, j, i)
 
         return [PolynomialVector(self.ntt_ring, vec_A, in_ntt_domain=True) for vec_A in ntt_A]
 
-    def mod_centered(self, v, modulo):
-        v = v % modulo
-        if v <= modulo//2:
-            return v
-        return - (modulo - v)
-
     def power2round_poly_vector(self, poly_vector, d):
 
         def power2round(r, d):
             r = int(r) % self.params.q
-            r0 = self.mod_centered(r, 2**d)
+            r0 = mod_centered(r, 2**d)
             return (r - r0)//2**d, r0
 
         poly_vector0 = [[] for _ in poly_vector]
@@ -287,7 +168,7 @@ class Dilithium():
 
     def decompose(self, r, alpha):
         r = int(r) % self.params.q
-        r0 = self.mod_centered(r, alpha)
+        r0 = mod_centered(r, alpha)
         if r - r0 == self.params.q - 1:
             return (0, r0 - 1)
         return (r - r0) // alpha, r0
@@ -368,7 +249,7 @@ class Dilithium():
 
             c_tilde = self.hash_H(mu + w1.as_bytes(), 32)
             c = self.sample_in_ball(c_tilde)
-            c_ntt = self.ntt_ring.ntt_polynomial(c)
+            c_ntt = self.ntt_ring.ntt(c)
             z = y + (s1_ntt * c_ntt).inv_ntt()
             r0 = self.low_bits(w - (s2_ntt * c_ntt).inv_ntt(), 2 * self.params.gamma2)
             z_norm_condition = (z.norm_infinity() >= self.params.gamma1 - self.params.beta)
@@ -400,7 +281,7 @@ class Dilithium():
         c = self.sample_in_ball(c_tilde)
 
         z_ntt = z.ntt()
-        c_ntt = self.ntt_ring.ntt_polynomial(c)
+        c_ntt = self.ntt_ring.ntt(c)
         t1_ntt = t1.ntt()
 
         r = self.matrix_poly_vec_product(ntt_A, z_ntt) - ((t1_ntt * c_ntt) * (2**self.params.d))
@@ -417,4 +298,24 @@ class Dilithium():
 
         return True
 
-dilithium = Dilithium(2)
+
+def test_dilithium():
+
+    for security_level in [2, 3, 5]:
+        print(f'Testing Dilithium {security_level}')
+        dilithium = Dilithium(security_level)
+        message = get_random_bytes(100)
+        pk, sk = dilithium.keygen()
+        signature = dilithium.sign(sk, message)
+        verification = dilithium.verify(pk, message, signature)
+        assert verification is True
+
+        verification2 = dilithium.verify(pk, message + b'a', signature)
+        assert verification2 is False
+
+        signature2 = dilithium.sign(sk, message + b'a')
+
+        verification2 = dilithium.verify(pk, message, signature2)
+        assert verification2 == False
+
+        print(f'Dilithium {security_level}: PASSED')
