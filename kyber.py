@@ -139,23 +139,6 @@ class Kyber():
             v.append(vector(self.F, poly_coeffs))
         return v, self.params.k
 
-
-    def sample_s_and_e(self, sigma):
-        s = []
-        counter = 0
-        for i in range(self.params.k):
-            poly_coeffs = self.centered_binomial_distribution(self.params.eta1, sigma + int(counter).to_bytes(1))
-            s.append(vector(self.F, poly_coeffs))
-            counter += 1
-
-        e = []
-        for i in range(self.params.k):
-            poly_coeffs = self.centered_binomial_distribution(self.params.eta1, sigma + int(counter).to_bytes(1))
-            e.append(vector(self.F, poly_coeffs))
-            counter += 1
-
-        return s, e
-
     def ntt_polynomial_product(self, ntt_poly1, ntt_poly2):
         return vector(self.F, [c1 * c2 for c1, c2 in zip(ntt_poly1, ntt_poly2)])
 
