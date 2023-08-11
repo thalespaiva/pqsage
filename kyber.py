@@ -11,7 +11,7 @@ from crystals_common import PolynomialVector
 from crystals_common import ntt_leveled_negacyclic_256
 from crystals_common import inv_ntt_leveled_negacyclic_256
 from crystals_common import bit_rev
-
+from crystals_common import mod_centered
 
 def int_to_bits(a, length):
     str_bits = bin(a)[2:]
@@ -58,7 +58,6 @@ class KyberParameters:
 
 class Kyber():
     SecurityParameters = {
-        # Security Level : parameters
         1: KyberParameters(
             q=3329, n=256, k=2, eta1=3, eta2=2, du=10, dv=4,
         ),
@@ -168,16 +167,25 @@ class Kyber():
         return (ntt_t, rho), (ntt_s)
 
     def compress(self, coefficients, d):
-        return [self.compress_coefficient(c, d) for c in coefficients]
+        def compress_coefficient(x, d):
+            return mod(round(2**d / self.params.q * int(x)), 2**d)
+        return [compress_coefficient(c, d) for c in coefficients]
 
     def decompress(self, coefficients, d):
-        return vector(self.ntt_ring.field, [self.decompress_coefficient(c, d) for c in coefficients])
+        def decompress_coefficient(x, d):
+            return round(self.params.q / 2**d * int(x))
+        return vector(self.ntt_ring.field, [decompress_coefficient(c, d) for c in coefficients])
 
-    def compress_coefficient(self, x, d):
-        return mod(round(2**d / self.params.q * int(x)), 2**d)
+    def encode_message(self, message):
+        return vector(self.ntt_ring.field, [bit * self.params.q//2 for bit in message])
 
-    def decompress_coefficient(self, x, d):
-        return round(self.params.q / 2**d * int(x))
+    def decode_message(self, noisy_message):
+        def decode_coeff(c):
+            if abs(int(mod_centered(c, self.params.q))) <= self.params.q//4:
+                return 0
+            return 1
+        return vector(self.ntt_ring.field, [decode_coeff(c) for c in noisy_message])
+
 
     def encrypt(self, pk, message, randomness):
         (ntt_t, rho) = pk
@@ -191,7 +199,7 @@ class Kyber():
         ntt_r = r.ntt()
         u = self.matrix_poly_vec_product(ntt_A_transpose, ntt_r).inv_ntt() + e1
 
-        encoded_message = self.decompress(message, 1)
+        encoded_message = self.encode_message(message)
         v = encoded_message + self.ntt_ring.inv_ntt(ntt_t * ntt_r) + e2
 
         u_compressed = [self.compress(u_i, self.params.du) for u_i in u]
@@ -208,7 +216,7 @@ class Kyber():
         ntt_u = u.ntt()
         noisy_message = v - self.ntt_ring.inv_ntt(ntt_s * ntt_u)
 
-        return vector(self.compress(noisy_message, 1))
+        return self.decode_message(noisy_message)
 
 
 def test_kyber():
