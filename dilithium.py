@@ -31,7 +31,6 @@ class DilithiumNTTRing():
 
 @dataclass
 class DilithiumParameters:
-    security_level: int
     q: int
     d: int
     tau: int
@@ -44,22 +43,17 @@ class DilithiumParameters:
     beta: int
     omega: int
 
-
 class Dilithium():
     SecurityParameters = {
-        # Security Level : parameters
         2: DilithiumParameters(
-            security_level=2, q=8380417, d=13, tau=39, gamma1=2**17, gamma2=95232,
-            n=256, k=4, l=4, eta=2, beta=78, omega=80,
-        ),
+            q=8380417, d=13, tau=39, gamma1=2**17, gamma2=95232,
+            n=256, k=4, l=4, eta=2, beta=78, omega=80),
         3: DilithiumParameters(
-            security_level=3, q=8380417, d=13, tau=49, gamma1=2**19, gamma2=261888,
-            n=256, k=6, l=5, eta=4, beta=196, omega=55,
-        ),
+            q=8380417, d=13, tau=49, gamma1=2**19, gamma2=261888,
+            n=256, k=6, l=5, eta=4, beta=196, omega=55),
         5: DilithiumParameters(
-            security_level=5, q=8380417, d=13, tau=60, gamma1=2**19, gamma2=261888,
-            n=256, k=8, l=7, eta=2, beta=120, omega=75,
-        )
+            q=8380417, d=13, tau=60, gamma1=2**19, gamma2=261888,
+            n=256, k=8, l=7, eta=2, beta=120, omega=75),
     }
 
     def __init__(self, security_level):
@@ -115,6 +109,7 @@ class Dilithium():
 
     def expand_S(self, rho_prime):
         # shake256 = SHAKE256.new(rho_prime)
+        # TODO CORRIGIR ISSO AQUI É CRÍTICO
         s_1 = []
         for i in range(self.params.l):
             s_1.append([])
