@@ -2,7 +2,7 @@ from sage.all import *
 
 
 def mod_centered(v, modulo):
-    v = v % modulo
+    v = int(v) % modulo
     if v <= modulo//2:
         return v
     return - (modulo - v)
