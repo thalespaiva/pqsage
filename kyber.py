@@ -35,7 +35,6 @@ class KyberNTTRing():
         return inv_ntt_leveled_negacyclic_256(a_hat, self.field, self.omega_n, 7)
 
     def poly_product_ntt_domain(self, a_hat, b_hat):
-
         prod = [None] * 256
         for i in range(0, 256, 2):
             pa = a_hat[i + 1]*self.x + a_hat[i]
@@ -47,13 +46,8 @@ class KyberNTTRing():
 
         return vector(self.field, prod)
 
-    def dot_product_ntt_domain(self, poly_vec_a_hat, poly_vec_b_hat):
-        return sum(self.poly_product_ntt_domain(poly_a, poly_b)
-                   for poly_a, poly_b in zip(poly_vec_a_hat, poly_vec_b_hat))
-
 @dataclass
 class KyberParameters:
-    security_level: int
     q: int
     n: int
     k: int
@@ -62,24 +56,21 @@ class KyberParameters:
     du: int
     dv: int
 
-
 class Kyber():
     SecurityParameters = {
         # Security Level : parameters
-        128: KyberParameters(
-            security_level=128, q=3329, n=256, k=2, eta1=3, eta2=2, du=10, dv=4,
+        1: KyberParameters(
+            q=3329, n=256, k=2, eta1=3, eta2=2, du=10, dv=4,
         ),
-        192: KyberParameters(
-            security_level=192, q=3329, n=256, k=3, eta1=2, eta2=2, du=10, dv=4,
+        3: KyberParameters(
+            q=3329, n=256, k=3, eta1=2, eta2=2, du=10, dv=4,
         ),
-        256: KyberParameters(
-            security_level=256, q=3329, n=256, k=4, eta1=2, eta2=2, du=11, dv=5,
+        5: KyberParameters(
+            q=3329, n=256, k=4, eta1=2, eta2=2, du=11, dv=5,
         ),
     }
 
     def __init__(self, security_level):
-        assert(security_level in self.SecurityParameters)
-
         self.params = self.SecurityParameters[security_level]
         self.ntt_ring = KyberNTTRing()
 
@@ -143,12 +134,12 @@ class Kyber():
     def to_poly_vec(self, poly_vec):
         return PolynomialVector(self.ntt_ring, poly_vec)
 
-    def sample_polynomial_with_centered_binomial(self, eta, seed, base_counter):
+    def sample_polynomial_from_cbd(self, eta, seed, base_counter):
         seed_counter_bytes = seed + int(base_counter).to_bytes(1)
         poly_coeffs = self.centered_binomial_distribution(eta, seed_counter_bytes)
         return vector(self.ntt_ring.field, poly_coeffs), 1
 
-    def sample_vector_with_centered_binomial(self, eta, seed, base_counter):
+    def sample_vector_from_cbd(self, eta, seed, base_counter):
         v = []
         for i in range(self.params.k):
             seed_counter_bytes = seed + int(base_counter + i).to_bytes(1)
@@ -168,8 +159,8 @@ class Kyber():
         ntt_A = self.get_ntt_A_from_seed(rho)
 
         counter = 0
-        s, counter = self.sample_vector_with_centered_binomial(self.params.eta1, sigma, counter)
-        e, counter = self.sample_vector_with_centered_binomial(self.params.eta1, sigma, counter)
+        s, counter = self.sample_vector_from_cbd(self.params.eta1, sigma, counter)
+        e, counter = self.sample_vector_from_cbd(self.params.eta1, sigma, counter)
         ntt_s = s.ntt()
         ntt_e = e.ntt()
 
@@ -194,12 +185,9 @@ class Kyber():
         ntt_A_transpose = self.get_ntt_A_transpose_from_seed(rho)
 
         counter = 0
-        r, counter = self.sample_vector_with_centered_binomial(self.params.eta1, randomness,
-                                                               counter)
-        e1, counter = self.sample_vector_with_centered_binomial(self.params.eta1, randomness,
-                                                                counter)
-        e2, counter  = self.sample_polynomial_with_centered_binomial(self.params.eta1, randomness,
-                                                                     counter)
+        r, counter = self.sample_vector_from_cbd(self.params.eta1, randomness, counter)
+        e1, counter = self.sample_vector_from_cbd(self.params.eta2, randomness, counter)
+        e2, counter  = self.sample_polynomial_from_cbd(self.params.eta2, randomness, counter)
         ntt_r = r.ntt()
         u = self.matrix_poly_vec_product(ntt_A_transpose, ntt_r).inv_ntt() + e1
 
@@ -225,7 +213,7 @@ class Kyber():
 
 def test_kyber():
 
-    for security_level in [128, 192, 256]:
+    for security_level in [1, 3, 5]:
         kyber = Kyber(security_level)
         message = random_vector(GF(2), 256).lift()
         pk, sk = kyber.keygen()
