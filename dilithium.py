@@ -12,6 +12,10 @@ from crystals_common import mod_centered
 from crystals_common import ntt_leveled_negacyclic_256
 from crystals_common import inv_ntt_leveled_negacyclic_256
 
+from pseudorandom import xof_randrange
+from pseudorandom import xof_random_int_mod
+from pseudorandom import xof_random_bit
+
 class DilithiumNTTRing():
 
     def __init__(self):
@@ -62,32 +66,14 @@ class Dilithium():
         self.params = self.SecurityParameters[security_level]
         self.ntt_ring = DilithiumNTTRing()
 
-    def gen_uniformly_random_polynomial_with_xof(self, rho, j, i):
-        seed_bytes = rho + int(j).to_bytes(1) + int(i).to_bytes(1)
-        xof = SHAKE128.new(seed_bytes)
-        hat_a = [None] * self.params.n
-
-        k = 0
-        while k < self.params.n:
-            b0, b1, b2 = [int.from_bytes(xof.read(1)) for _ in range(3)]
-
-            d1 = b0 + 256 * (b1 % 16)
-            d2 = (b1 // 16) + 16 * b2
-
-            if d1 < self.params.q:
-                hat_a[k] = d1
-                k += 1
-            if d2 < self.params.q and k < self.params.n:
-                hat_a[k] = d2
-                k += 1
-
-        return vector(self.ntt_ring.field, hat_a)
-
-    def get_ntt_A_from_seed(self, rho):
+    def get_ntt_A_from_seed(self, rho, transpose=False):
         ntt_A = [[None] * self.params.l for _ in range(self.params.k)]
         for i in range(self.params.k):
             for j in range(self.params.l):
-                ntt_A[i][j] = self.gen_uniformly_random_polynomial_with_xof(rho, j, i)
+                seed_bytes = rho + int(j).to_bytes(1) + int(i).to_bytes(1)
+                xof = SHAKE128.new(seed_bytes)
+                coeffs = [xof_random_int_mod(xof, self.params.q) for i in range(self.params.n)]
+                ntt_A[i][j] = coeffs
 
         return [PolynomialVector(self.ntt_ring, vec_A, in_ntt_domain=True) for vec_A in ntt_A]
 
@@ -105,24 +91,16 @@ class Dilithium():
                 r1, r0 = power2round(r, d)
                 poly_vector0[i].append(r0)
                 poly_vector1[i].append(r1)
-        return PolynomialVector(self.ntt_ring, poly_vector1), PolynomialVector(self.ntt_ring, poly_vector0)
+        return self.to_poly_vec(poly_vector1), self.to_poly_vec(poly_vector0)
 
     def expand_S(self, rho_prime):
-        # shake256 = SHAKE256.new(rho_prime)
-        # TODO CORRIGIR ISSO AQUI É CRÍTICO
-        s_1 = []
-        for i in range(self.params.l):
-            s_1.append([])
-            for j in range(self.params.n):
-                s_1[i].append(randint(-self.params.eta, self.params.eta))
+        shake256 = SHAKE256.new(rho_prime)
+        s_1 = [[xof_randrange(shake256, -self.params.eta, self.params.eta + 1)
+                    for j in range(self.params.n)] for i in range(self.params.l)]
+        s_2 = [[xof_randrange(shake256, -self.params.eta, self.params.eta + 1)
+                    for j in range(self.params.n)] for i in range(self.params.k)]
 
-        s_2 = []
-        for i in range(self.params.k):
-            s_2.append([])
-            for j in range(self.params.n):
-                s_2[i].append(randint(-self.params.eta, self.params.eta))
-
-        return PolynomialVector(self.ntt_ring, s_1), PolynomialVector(self.ntt_ring, s_2)
+        return self.to_poly_vec(s_1), self.to_poly_vec(s_2)
 
     def matrix_poly_vec_product(self, ntt_matrix, poly_vec):
         return PolynomialVector(self.ntt_ring, [ntt_vec * poly_vec for ntt_vec in ntt_matrix],
@@ -154,11 +132,11 @@ class Dilithium():
         xof = SHAKE256.new(c_tilde)
         c = [0] * 256
         for i in range(256 - self.params.tau, 256):
-            j = int.from_bytes(xof.read(1))
-            s = int.from_bytes(xof.read(1)) & 1
+            j = xof_randrange(xof, 0, i + 1)
             c[i] = c[j]
-            c[j] = (-1)**s
+            c[j] = (-1)**xof_random_bit(xof)
 
+        assert(c.count(1) + c.count(-1) == self.params.tau)
         return c
 
     def decompose(self, r, alpha):
