@@ -36,14 +36,14 @@ class DilithiumNTTRing():
 @dataclass
 class DilithiumParameters:
     q: int
-    d: int
-    tau: int
-    gamma1: int
-    gamma2: int
     n: int
     k: int
     l: int
+    tau: int
     eta: int
+    d: int
+    gamma1: int
+    gamma2: int
     beta: int
     omega: int
 
@@ -61,8 +61,6 @@ class Dilithium():
     }
 
     def __init__(self, security_level):
-        assert(security_level in self.SecurityParameters)
-
         self.params = self.SecurityParameters[security_level]
         self.ntt_ring = DilithiumNTTRing()
 
@@ -77,24 +75,23 @@ class Dilithium():
 
         return [PolynomialVector(self.ntt_ring, vec_A, in_ntt_domain=True) for vec_A in ntt_A]
 
+    def power2round(self, r, d):
+        r = int(r) % self.params.q
+        r0 = mod_centered(r, 2**d)
+        return (r - r0)//2**d, r0
+
     def power2round_poly_vector(self, poly_vector, d):
-
-        def power2round(r, d):
-            r = int(r) % self.params.q
-            r0 = mod_centered(r, 2**d)
-            return (r - r0)//2**d, r0
-
         poly_vector0 = [[] for _ in poly_vector]
         poly_vector1 = [[] for _ in poly_vector]
         for i, poly in enumerate(poly_vector):
             for r in poly:
-                r1, r0 = power2round(r, d)
+                r1, r0 = self.power2round(r, d)
                 poly_vector0[i].append(r0)
                 poly_vector1[i].append(r1)
         return self.to_poly_vec(poly_vector1), self.to_poly_vec(poly_vector0)
 
-    def expand_S(self, rho_prime):
-        shake256 = SHAKE256.new(rho_prime)
+    def expand_S(self, sigma):
+        shake256 = SHAKE256.new(sigma)
         s_1 = [[xof_randrange(shake256, -self.params.eta, self.params.eta + 1)
                     for j in range(self.params.n)] for i in range(self.params.l)]
         s_2 = [[xof_randrange(shake256, -self.params.eta, self.params.eta + 1)
@@ -110,19 +107,18 @@ class Dilithium():
         zeta = get_random_bytes(32)
         xof_h = XOF_H.new(zeta)
         rho = xof_h.read(32)
-        rho_prime = xof_h.read(64)
-        K = xof_h.read(32)
+        sigma = xof_h.read(64)
 
         ntt_A = self.get_ntt_A_from_seed(rho)
-        s1, s2 = self.expand_S(rho_prime)
+        s1, s2 = self.expand_S(sigma)
         ntt_s1 = s1.ntt()
 
         t = self.matrix_poly_vec_product(ntt_A, ntt_s1).inv_ntt() + s2
         t1, t0 = self.power2round_poly_vector(t, self.params.d)
-        tr = self.hash_H(rho + t1.as_bytes(), 32)
+        pk_hash = self.hash_H(rho + t1.as_bytes(), 32)
 
         assert (t1 * 2**self.params.d == t - t0)
-        return (rho, t1), (rho, K, tr, s1, s2, t0)
+        return (rho, t1), (rho, pk_hash, s1, s2, t0)
 
     def hash_H(self, seed_bytes, n_bytes):
         xof_h = XOF_H.new(seed_bytes)
@@ -178,16 +174,30 @@ class Dilithium():
         return self.to_poly_vec(v)
 
     def make_hint(self, z, r, alpha):
-        v = [[self.make_hint_coefficient(c_z, c_r, alpha) for c_z, c_r in zip(poly_z, poly_r)]
-                for poly_z, poly_r in zip(z, r)]
+        v = []
+        for poly_z, poly_r in zip(z, r):
+            v.append([self.make_hint_coefficient(c_z, c_r, alpha)
+                     for c_z, c_r in zip(poly_z, poly_r)])
         return self.to_poly_vec(v)
 
     def use_hint(self, h, r, alpha):
-        v = [[self.use_hint_coefficient(c_h, c_r, alpha) for c_h, c_r in zip(poly_h, poly_r)]
-              for poly_h, poly_r in zip(h, r)]
+        v = []
+        for poly_h, poly_r in zip(h, r):
+            v.append([self.use_hint_coefficient(c_h, c_r, alpha)
+                      for c_h, c_r in zip(poly_h, poly_r)])
         return self.to_poly_vec(v)
 
     def expand_mask(self, rhoprime, kappa):
+        xof = SHAKE256.new(rhoprime + kappa)
+        y = []
+        for i in range(self.params.l):
+            y.append([xof_randrange(xof, -self.params.gamma1 + 1, self.params.gamma1 + 1)
+                      for j in range(self.params.n)])
+
+        return PolynomialVector(self.ntt_ring, y)
+
+
+    def expand_mask_original(self, rhoprime, kappa):
         xof = SHAKE256.new(rhoprime + kappa)
         n_bytes = ceil(log(2 * self.params.gamma1, 2**8))
         assert is_power_of_two(self.params.gamma1)
@@ -200,48 +210,57 @@ class Dilithium():
 
         return PolynomialVector(self.ntt_ring, y)
 
-    def sign(self, sk, message_bytes):
-        (rho, K, tr, s1, s2, t0) = sk
+    def get_w_c_z(self, y, ntt_A, s1_ntt, s2_ntt, mu):
+        y_ntt = y.ntt()
 
-        ntt_A = self.get_ntt_A_from_seed(rho)
-        mu = self.hash_H(tr + message_bytes, 64)
+        w = self.matrix_poly_vec_product(ntt_A, y_ntt).inv_ntt()
+        w1 = self.high_bits(w, 2 * self.params.gamma2)
 
-        kappa = 0
-        rho_prime = get_random_bytes(64)
+        c_tilde = self.hash_H(mu + w1.as_bytes(), 32)
+        c = self.sample_in_ball(c_tilde)
+        c_ntt = self.ntt_ring.ntt(c)
+        z = y + (s1_ntt * c_ntt).inv_ntt()
 
-        s1_ntt = s1.ntt()
-        s2_ntt = s2.ntt()
-        t0_ntt = t0.ntt()
+        r0 = self.low_bits(w - (s2_ntt * c_ntt).inv_ntt(), 2 * self.params.gamma2)
+        z_norm_condition = (z.norm_infinity() >= self.params.gamma1 - self.params.beta)
+        r0_norm_condition = (r0.norm_infinity() >= self.params.gamma2 - self.params.beta)
 
-        (z, h) = (None, None)
-        while (z, h) == (None, None):
-            y = self.expand_mask(rho_prime, kappa.to_bytes(32))
-            y_ntt = y.ntt()
-            w = self.matrix_poly_vec_product(ntt_A, y_ntt).inv_ntt()
-            w1 = self.high_bits(w, 2 * self.params.gamma2)
+        if z_norm_condition or r0_norm_condition:
+            return None
 
-            c_tilde = self.hash_H(mu + w1.as_bytes(), 32)
-            c = self.sample_in_ball(c_tilde)
-            c_ntt = self.ntt_ring.ntt(c)
-            z = y + (s1_ntt * c_ntt).inv_ntt()
-            r0 = self.low_bits(w - (s2_ntt * c_ntt).inv_ntt(), 2 * self.params.gamma2)
-            z_norm_condition = (z.norm_infinity() >= self.params.gamma1 - self.params.beta)
-            r0_norm_condition = (r0.norm_infinity() >= self.params.gamma2 - self.params.beta)
+        return ((w, w1), (c_tilde, c_ntt), z)
 
-            if z_norm_condition or r0_norm_condition:
-                (z, h) = (None, None)
+    def get_hints_for_w(self, w_and_w1, t0_ntt, s2_ntt, c_ntt):
+        w, w1 = w_and_w1
+        ct0 = (t0_ntt * c_ntt).inv_ntt()
+        cs2 = (s2_ntt * c_ntt).inv_ntt()
+        h = self.make_hint(-ct0, w - cs2 + ct0, 2 * self.params.gamma2)
 
-            else:
-                ct0 = (t0_ntt * c_ntt).inv_ntt()
-                cs2 = (s2_ntt * c_ntt).inv_ntt()
-                h = self.make_hint(-ct0, w - cs2 + ct0, 2 * self.params.gamma2)
-
-                n_ones_in_h = sum(p.hamming_weight() for p in h)
-                if ct0.norm_infinity() >= self.params.gamma2 or n_ones_in_h > self.params.omega:
-                    (z, h) = (None, None)
-            kappa += self.params.l
+        n_ones_in_h = sum(p.hamming_weight() for p in h)
+        if ct0.norm_infinity() >= self.params.gamma2 or n_ones_in_h > self.params.omega:
+            None
 
         assert(self.use_hint(h, w - cs2 + ct0, 2 * self.params.gamma2) == w1)
+
+        return h
+
+    def sign(self, sk, message_bytes):
+        (rho, pk_hash, s1, s2, t0) = sk
+        ntt_A = self.get_ntt_A_from_seed(rho)
+        mu = self.hash_H(pk_hash + message_bytes, 64)
+
+        sigma_prime = get_random_bytes(64)
+        s1_ntt, s2_ntt, t0_ntt = s1.ntt(), s2.ntt(), t0.ntt()
+
+        kappa, (z, h) = 0, (None, None)
+        while h == None:
+            y = self.expand_mask(sigma_prime, kappa.to_bytes(32))
+            kappa += self.params.l
+
+            w_c_z = self.get_w_c_z(y, ntt_A, s1_ntt, s2_ntt, mu)
+            if w_c_z:
+                (w, w1), (c_tilde, c_ntt), z = w_c_z
+                h = self.get_hints_for_w((w, w1), t0_ntt, s2_ntt, c_ntt)
 
         return (c_tilde, z, h)
 
@@ -250,7 +269,9 @@ class Dilithium():
         (c_tilde, z, h) = signature
 
         ntt_A = self.get_ntt_A_from_seed(rho)
-        mu = self.hash_H(self.hash_H(rho + t1.as_bytes(), 32) + message_bytes, 64)
+
+        pk_hash = self.hash_H(rho + t1.as_bytes(), 32)
+        mu = self.hash_H(pk_hash + message_bytes, 64)
         c = self.sample_in_ball(c_tilde)
 
         z_ntt = z.ntt()
