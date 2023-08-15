@@ -1,6 +1,6 @@
 from sage.all import *
 
-from Crypto.Random import get_random_bytes
+# from Crypto.Random import get_random_bytes
 
 from dataclasses import dataclass
 
@@ -22,24 +22,23 @@ class NTRUHPS_PKE_CPA:
         self.ring_mod_q = PolynomialRing(Integers(self.params.q), 'x')
         self.ring_mod_3 = PolynomialRing(Integers(3), 'x')
         self.ring_mod_2 = PolynomialRing(Integers(2), 'x')
-        # self.ring_mod_q = PolynomialRing(ZZ, 'x')
+
         self.x = self.ring_mod_q.gen()
         self.phi = self.x**self.params.n - 1
         self.phi_1 = self.x - 1
         self.phi_n = sum(self.x**i for i in range(self.params.n))
+
         assert self.phi_n * self.phi_1 == self.phi
 
-        self.Rq = self.ring_mod_q.quotient(self.phi)
-        self.Rq_phi_1 = self.ring_mod_q.quotient(self.phi_1)
-        self.Rq_phi_n = self.ring_mod_q.quotient(self.phi_n)
+        self.Rq = self.ring_mod_q.quotient_ring(self.phi)
 
-        self.Sq = self.ring_mod_q.quotient(self.phi_n)
-        self.S3 = self.ring_mod_3.quotient(self.phi_n)
-        self.S2 = self.ring_mod_2.quotient(self.phi_n)
+        self.Sq = self.ring_mod_q.quotient_ring(self.phi_n)
+        self.S3 = self.ring_mod_3.quotient_ring(self.phi_n)
+        self.S2 = self.ring_mod_2.quotient_ring(self.phi_n)
 
     def mod_centered(self, v, modulo):
         v = int(v) % modulo
-        if v <= modulo//2:
+        if v <= modulo // 2:
             return v
         return - (modulo - v)
 
@@ -64,9 +63,9 @@ class NTRUHPS_PKE_CPA:
         return [self.mod_centered(c, modulo) for c in polynomial]
 
     def Rq_inverse(self, a):
-        # out b such that Sq_bar(a * b) = 1
-        v0 = self.centered(self.S2(list(a)).inverse())
+        assert is_power_of_two(self.params.q)
 
+        v0 = self.centered(self.S2(list(a)).inverse())
         t = 1
         while t < log(self.params.q, 2):
             v0_in_Rq = self.Rq(v0)
@@ -84,7 +83,7 @@ class NTRUHPS_PKE_CPA:
     def keygen(self):
         f_in_s3 = self.S3(self.generate_ternary_coefficients(self.params.n - 2))
         g_in_s3 = self.S3(self.generate_ternary_coefficients_for_d(self.params.q//8 - 2,
-                                                                self.params.n - 2))
+                                                                   self.params.n - 2))
         f_inv_3 = f_in_s3.inverse()
 
         f = self.to_Rq(f_in_s3)
@@ -102,26 +101,23 @@ class NTRUHPS_PKE_CPA:
 
         c = h * r + m
 
-        m = ntru.centered(self.from_Rq_to_Sq(m))
+        m = self.centered(self.from_Rq_to_Sq(m))
         return (r, m), c
 
     def decrypt(self, sk, ciphertext):
         (f, f_inv_q, f_inv_3, h_inv_q, g) = sk
         c = ciphertext
 
-        if self.Rq_phi_1(self.centered(c)) != 0:
+        if c.lift().mod(self.phi_1) != 0:
             return (0, 0, 1)
 
         a = (c * self.to_Rq(f))
-        # return a, f_inv_3
         m = self.S3(self.centered(a)) * f_inv_3
-        # m = self.to_Rq(m)
-        m = ntru.centered(m)
+        m = self.centered(m)
         return m
 
 
-
-
+# Table from NTRU specs for HPS parameters:
 # − n is a prime and both 2 and 3 are of order n − 1 in (Z/n)× ,
 # − p = 3,
 # − q is a power of two,
@@ -137,32 +133,11 @@ def test_ntru():
     for security_level in [1, 3, 5]:
         ntru = NTRUHPS_PKE_CPA(security_level)
         pk, sk = ntru.keygen()
-        randomness = get_random_bytes(32)
-        message, ciphertext = ntru.encrypt(pk, randomness)
+        # randomness = get_random_bytes(32)
+        message, ciphertext = ntru.encrypt(pk, None)
         decrypted = ntru.decrypt(sk, ciphertext)
         assert decrypted == message[1]
 
         print(f'NTRU {security_level}: PASSED')
         # print(f'message = {"".join(map(str, message))}')
 
-# def test_ntru():
-
-#     for security_level in [1, 3, 5]:
-#         ntru = NTRUHPS_PKE_CPA(security_level)
-#         message = random_vector(GF(2), 256).lift()
-#         pk, sk = ntru.keygen()
-#         randomness = get_random_bytes(32)
-#         ciphertext1 = ntru.encrypt(pk, message, randomness)
-#         decrypted = ntru.decrypt(sk, ciphertext1)
-#         assert decrypted == message
-
-#         ciphertext2 = ntru.encrypt(pk, message, randomness)
-#         assert ciphertext1 == ciphertext2
-#         randomness2 = get_random_bytes(32)
-#         ciphertext3 = ntru.encrypt(pk, message, randomness2)
-
-#         assert ciphertext1 != ciphertext3
-#         print(f'NTRU {security_level}: PASSED')
-#         print(f'message = {"".join(map(str, message))}')
-
-ntru = NTRUHPS_PKE_CPA(Integer(1))
