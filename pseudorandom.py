@@ -19,3 +19,9 @@ def xof_random_int_mod(xof, mod):
 def xof_randrange(xof, min_include, max_exclude):
     diff = max_exclude - min_include
     return min_include + xof_random_int_mod(xof, diff)
+
+def xof_centered_binomial_sample(xof, eta):
+    a = sum(xof_random_bit(xof) for _ in range(eta))
+    b = sum(xof_random_bit(xof) for _ in range(eta))
+    return a - b
+

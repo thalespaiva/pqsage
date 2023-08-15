@@ -2,7 +2,7 @@ from sage.all import *
 from itertools import chain
 from dataclasses import dataclass
 
-from Crypto.Hash import SHAKE128
+from Crypto.Hash import SHAKE128 as XOF
 from Crypto.Hash import SHA3_512 as HASH_G
 from Crypto.Hash import SHAKE256 as PRF
 from Crypto.Random import get_random_bytes
@@ -15,6 +15,7 @@ from crystals_common import mod_centered
 
 from pseudorandom import xof_random_bit
 from pseudorandom import xof_random_int_mod
+from pseudorandom import xof_centered_binomial_sample
 
 class KyberNTTRing():
 
@@ -53,7 +54,7 @@ class KyberParameters:
     du: int
     dv: int
 
-class Kyber():
+class KyberPKE_CPA():
     SecurityParameters = {
         1: KyberParameters(
             q=3329, n=256, k=2, eta1=3, eta2=2, du=10, dv=4,
@@ -78,35 +79,22 @@ class Kyber():
                     seed_bytes = rho + int(j).to_bytes(1) + int(i).to_bytes(1)
                 else:
                     seed_bytes = rho + int(i).to_bytes(1) + int(j).to_bytes(1)
-                xof = SHAKE128.new(seed_bytes)
+                xof = XOF.new(seed_bytes)
                 coeffs = [xof_random_int_mod(xof, self.params.q) for i in range(self.params.n)]
                 ntt_A[i][j] = coeffs
 
         return [PolynomialVector(self.ntt_ring, vec_A, in_ntt_domain=True) for vec_A in ntt_A]
 
-    def get_n_samples_from_cbd(self, eta, seed):
-        xof = PRF.new(seed)
-        f = []
-        for i in range(self.params.n):
-            a = sum(xof_random_bit(xof) for _ in range(eta))
-            b = sum(xof_random_bit(xof) for _ in range(eta))
-            f.append(a - b)
-        return f
-
     def to_poly_vec(self, poly_vec):
         return PolynomialVector(self.ntt_ring, poly_vec)
 
-    def sample_polynomial_from_cbd(self, eta, seed, base_counter):
-        seed_counter_bytes = seed + int(base_counter).to_bytes(1)
-        poly_coeffs = self.get_n_samples_from_cbd(eta, seed_counter_bytes)
-        return vector(self.ntt_ring.field, poly_coeffs), 1
+    def sample_polynomial_from_cbd(self, eta, xof):
+        coeffs = [xof_centered_binomial_sample(xof, eta) for i in range(self.params.n)]
+        return vector(self.ntt_ring.field, coeffs)
 
-    def sample_vector_from_cbd(self, eta, seed, base_counter):
-        v = []
-        for i in range(self.params.k):
-            seed_counter_bytes = seed + int(base_counter + i).to_bytes(1)
-            v.append(self.get_n_samples_from_cbd(eta, seed_counter_bytes))
-        return self.to_poly_vec(v), base_counter + self.params.k
+    def sample_vector_from_cbd(self, eta, xof):
+        v = [self.sample_polynomial_from_cbd(eta, xof) for i in range(self.params.k)]
+        return self.to_poly_vec(v)
 
     def matrix_poly_vec_product(self, ntt_matrix, poly_vec):
         return PolynomialVector(self.ntt_ring, [ntt_vec * poly_vec for ntt_vec in ntt_matrix],
@@ -118,9 +106,9 @@ class Kyber():
         rho, sigma = hash_g_of_d[:16], hash_g_of_d[16:]
         ntt_A = self.get_ntt_A_from_seed(rho)
 
-        counter = 0
-        s, counter = self.sample_vector_from_cbd(self.params.eta1, sigma, counter)
-        e, counter = self.sample_vector_from_cbd(self.params.eta1, sigma, counter)
+        sigma_xof = PRF.new(sigma)
+        s = self.sample_vector_from_cbd(self.params.eta1, sigma_xof)
+        e = self.sample_vector_from_cbd(self.params.eta1, sigma_xof)
         ntt_s = s.ntt()
         ntt_e = e.ntt()
 
@@ -153,10 +141,10 @@ class Kyber():
 
         ntt_A_transpose = self.get_ntt_A_from_seed(rho, transpose=True)
 
-        counter = 0
-        r, counter = self.sample_vector_from_cbd(self.params.eta1, randomness, counter)
-        e1, counter = self.sample_vector_from_cbd(self.params.eta2, randomness, counter)
-        e2, counter  = self.sample_polynomial_from_cbd(self.params.eta2, randomness, counter)
+        rand_vectors_xof = PRF.new(randomness)
+        r = self.sample_vector_from_cbd(self.params.eta1, rand_vectors_xof)
+        e1 = self.sample_vector_from_cbd(self.params.eta2, rand_vectors_xof)
+        e2  = self.sample_polynomial_from_cbd(self.params.eta2, rand_vectors_xof)
         ntt_r = r.ntt()
         u = self.matrix_poly_vec_product(ntt_A_transpose, ntt_r).inv_ntt() + e1
 
@@ -183,7 +171,7 @@ class Kyber():
 def test_kyber():
 
     for security_level in [1, 3, 5]:
-        kyber = Kyber(security_level)
+        kyber = KyberPKE_CPA(security_level)
         message = random_vector(GF(2), 256).lift()
         pk, sk = kyber.keygen()
         randomness = get_random_bytes(32)
