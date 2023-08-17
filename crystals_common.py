@@ -8,7 +8,7 @@ def mod_centered(v, modulo):
     return - (modulo - v)
 
 
-def bit_rev(x, length=8):
+def bit_rev(x, length):
     b = bin(x)[2:]
     b = '0' * (length - len(b)) + b
     return int(''.join(reversed(b)), 2)
@@ -124,7 +124,7 @@ class PolynomialVector():
 
     def norm_infinity(self):
         def abs_value(x):
-            return mod_centered(int(x), self.ntt_ring.field.order())
+            return abs(mod_centered(x, self.ntt_ring.field.order()))
         return max(abs_value(i) for p in self for i in p)
 
     def __eq__(self, other):

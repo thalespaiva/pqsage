@@ -178,7 +178,7 @@ class Dilithium():
         for poly_z, poly_r in zip(z, r):
             v.append([self.make_hint_coefficient(c_z, c_r, alpha)
                      for c_z, c_r in zip(poly_z, poly_r)])
-        return self.to_poly_vec(v)
+        return v
 
     def use_hint(self, h, r, alpha):
         v = []
@@ -222,13 +222,14 @@ class Dilithium():
         z = y + (s1_ntt * c_ntt).inv_ntt()
 
         r0 = self.low_bits(w - (s2_ntt * c_ntt).inv_ntt(), 2 * self.params.gamma2)
-        z_norm_condition = (z.norm_infinity() >= self.params.gamma1 - self.params.beta)
-        r0_norm_condition = (r0.norm_infinity() >= self.params.gamma2 - self.params.beta)
+        z_norm_cond = (z.norm_infinity() >= self.params.gamma1 - self.params.beta)
+        r0_norm_cond = (r0.norm_infinity() >= self.params.gamma2 - self.params.beta)
 
-        if z_norm_condition or r0_norm_condition:
+        if z_norm_cond or r0_norm_cond:
             return None
 
         return ((w, w1), (c_tilde, c_ntt), z)
+
 
     def get_hints_for_w(self, w_and_w1, t0_ntt, s2_ntt, c_ntt):
         w, w1 = w_and_w1
@@ -236,9 +237,9 @@ class Dilithium():
         cs2 = (s2_ntt * c_ntt).inv_ntt()
         h = self.make_hint(-ct0, w - cs2 + ct0, 2 * self.params.gamma2)
 
-        n_ones_in_h = sum(p.hamming_weight() for p in h)
+        n_ones_in_h = sum(sum(p) for p in h)
         if ct0.norm_infinity() >= self.params.gamma2 or n_ones_in_h > self.params.omega:
-            None
+            return None
 
         assert(self.use_hint(h, w - cs2 + ct0, 2 * self.params.gamma2) == w1)
 
@@ -287,14 +288,13 @@ class Dilithium():
         if (c_tilde != self.hash_H(mu + w1.as_bytes(), 32)):
             return False
 
-        if sum(p.hamming_weight() for p in h) > self.params.omega:
+        if sum(sum(p) for p in h) > self.params.omega:
             return False
 
         return True
 
 
 def test_dilithium():
-
     for security_level in [2, 3, 5]:
         print(f'Testing Dilithium {security_level}')
         dilithium = Dilithium(security_level)
@@ -313,3 +313,6 @@ def test_dilithium():
         assert verification2 == False
 
         print(f'Dilithium {security_level}: PASSED')
+
+if __name__ == '__main__':
+    test_dilithium()
