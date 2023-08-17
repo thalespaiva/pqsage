@@ -1,8 +1,10 @@
 from sage.all import *
 
 from Crypto.Random import get_random_bytes
+from Crypto.Hash import SHAKE256
 
 from dataclasses import dataclass
+from pseudorandom import xof_sample_k_indexes
 
 @dataclass
 class NTRUHPS_Parameters:
@@ -10,7 +12,7 @@ class NTRUHPS_Parameters:
     q: int
     d: int
 
-class NTRUHPS_PKE_CPA:
+class NTRU_DPKE_OWCPA:
     SecurityParameters = {
         1: NTRUHPS_Parameters(n=509, q=2048, d=254),
         3: NTRUHPS_Parameters(n=677, q=2048, d=254),
@@ -46,13 +48,13 @@ class NTRUHPS_PKE_CPA:
     def from_S3_to_Rq(self, poly):
         return self.Rq([self.mod_centered(c, 3) for c in poly])
 
-    def generate_ternary_coefficients(self, max_degree):
-        return [choice([-1, 0, 1]) for _ in range(max_degree)]
+    def generate_ternary_coefficients(self, xof, max_degree):
+        return [choice([-1, 0, 1]) for _ in range(max_degree + 1)]
 
-    def generate_ternary_coefficients_for_d(self, d, max_degree):
+    def generate_ternary_coefficients_for_d(self, xof, d, max_degree):
         assert d % 2 == 0
-        coeffs = [0] * max_degree
-        supp = sample(range(max_degree), d)
+        coeffs = [0] * (max_degree + 1)
+        supp = xof_sample_k_indexes(xof, max_degree + 1, d)
         for i in range(d // 2):
             coeffs[supp[i]] = 1
             coeffs[supp[d//2 + i]] = -1
@@ -84,9 +86,10 @@ class NTRUHPS_PKE_CPA:
     def from_Rq_to_S3(self, poly):
         return self.S3(self.centered(from_Rq_to_Sq(poly)))
 
-    def keygen(self):
-        f_in_s3 = self.S3(self.generate_ternary_coefficients(self.params.n - 2))
-        g_in_s3 = self.S3(self.generate_ternary_coefficients_for_d(self.params.d,
+    def keygen(self, randomness):
+        xof = SHAKE256.new(randomness)
+        f_in_s3 = self.S3(self.generate_ternary_coefficients(xof, self.params.n - 2))
+        g_in_s3 = self.S3(self.generate_ternary_coefficients_for_d(xof, self.params.d,
                                                                    self.params.n - 2))
         f_inv_3 = f_in_s3.inverse()
 
@@ -96,19 +99,26 @@ class NTRUHPS_PKE_CPA:
         h = 3 * g * self.Rq_inverse(f)
         h_inv_q = self.Rq_inverse(h)
 
-        return h, (f, None, f_inv_3, h_inv_q, g)
+        return h, (f, f_inv_3, h_inv_q)
 
-    def encrypt(self, pk, randomness):
+    def sample_plaintext(self, randomness):
+        xof = SHAKE256.new(randomness)
+
+        r = self.generate_ternary_coefficients(xof, self.params.n - 2)
+        m = self.generate_ternary_coefficients_for_d(xof,
+                                                    self.params.d,
+                                                    self.params.n - 2)
+        return r, m
+
+    def encrypt(self, pk, plaintext):
         h = pk
-        r = self.Rq(self.generate_ternary_coefficients(self.params.n - 2))
-        m = self.Rq(self.generate_ternary_coefficients_for_d(self.params.d,
-                                                             self.params.n - 2))
+        r_coeffs, m_coeffs = plaintext
 
+        r = self.Rq(r_coeffs)
+        m = self.Rq(m_coeffs)
         c = h * r + m
 
-        m = self.centered(self.from_Rq_to_Sq(m))
-        r = self.centered(self.from_Rq_to_Sq(r))
-        return (r, m), c
+        return c
 
     def is_valid_plaintext(self, r, m):
         if (m.count(-1), m.count(1)) != (self.params.d//2, self.params.d//2):
@@ -121,7 +131,7 @@ class NTRUHPS_PKE_CPA:
         return True
 
     def decrypt(self, sk, ciphertext):
-        (f, f_inv_q, f_inv_3, h_inv_q, g) = sk
+        (f, f_inv_3, h_inv_q) = sk
         c = ciphertext
 
         if c.lift().mod(self.phi_1) != 0:
@@ -144,12 +154,14 @@ class NTRUHPS_PKE_CPA:
 def test_ntru():
 
     for security_level in [1, 3, 5]:
-        ntru = NTRUHPS_PKE_CPA(security_level)
-        pk, sk = ntru.keygen()
-        # randomness = get_random_bytes(32)
-        message, ciphertext = ntru.encrypt(pk, None)
+        ntru = NTRU_DPKE_OWCPA(security_level)
+        keygen_randomness = get_random_bytes(32)
+        plaintext_randomness = get_random_bytes(32)
+        pk, sk = ntru.keygen(keygen_randomness)
+        plaintext = ntru.sample_plaintext(plaintext_randomness)
+        ciphertext = ntru.encrypt(pk, plaintext)
         decrypted = ntru.decrypt(sk, ciphertext)
-        assert decrypted == message
+        assert decrypted == plaintext
 
         print(f'NTRU {security_level}: PASSED')
 

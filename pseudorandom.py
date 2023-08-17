@@ -25,3 +25,10 @@ def xof_centered_binomial_sample(xof, eta):
     b = sum(xof_random_bit(xof) for _ in range(eta))
     return a - b
 
+def xof_sample_k_indexes(xof, n_items, k):
+    a = list(range(n_items))
+    for i in range(n_items - 1):
+        j = xof_randrange(xof, i, n_items)
+        a[i], a[j] = a[j], a[i]
+
+    return a[:k]
