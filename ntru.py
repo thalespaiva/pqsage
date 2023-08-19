@@ -11,64 +11,61 @@ class NTRUHPS_Parameters:
     n: int
     q: int
     d: int
+    max_degree_t: int
 
 class NTRU_DPKE_OWCPA:
     SecurityParameters = {
-        1: NTRUHPS_Parameters(n=509, q=2048, d=254),
-        3: NTRUHPS_Parameters(n=677, q=2048, d=254),
-        5: NTRUHPS_Parameters(n=821, q=2048, d=254),
+        1: NTRUHPS_Parameters(n=509, q=2048, d=254, max_degree_t=509 - 2),
+        3: NTRUHPS_Parameters(n=677, q=2048, d=254, max_degree_t=677 - 2),
+        5: NTRUHPS_Parameters(n=821, q=2048, d=254, max_degree_t=821 - 2),
     }
+
+    def __init_rings(self):
+        ring_mod_q = PolynomialRing(Integers(self.params.q), 'x')
+
+        x = ring_mod_q.gen()
+        phi = x**self.params.n - 1
+        phi_1 = x - 1
+        phi_n = sum(x**i for i in range(self.params.n))
+        assert phi_n * phi_1 == phi
+
+        self.Rq = ring_mod_q.quotient_ring(phi)
+        self.Sq = ring_mod_q.quotient_ring(phi_n)
+        self.S3 = ring_mod_q.change_ring(Integers(3)).quotient(phi_n)
+        self.S2 = ring_mod_q.change_ring(Integers(2)).quotient(phi_n)
+        self.phi_1 = phi_1
 
     def __init__(self, security_level):
         self.params = self.SecurityParameters[security_level]
-
-        self.ring_mod_q = PolynomialRing(Integers(self.params.q), 'x')
-        self.ring_mod_3 = PolynomialRing(Integers(3), 'x')
-        self.ring_mod_2 = PolynomialRing(Integers(2), 'x')
-
-        self.x = self.ring_mod_q.gen()
-        self.phi = self.x**self.params.n - 1
-        self.phi_1 = self.x - 1
-        self.phi_n = sum(self.x**i for i in range(self.params.n))
-
-        assert self.phi_n * self.phi_1 == self.phi
-
-        self.Rq = self.ring_mod_q.quotient_ring(self.phi)
-
-        self.Sq = self.ring_mod_q.quotient_ring(self.phi_n)
-        self.S3 = self.ring_mod_3.quotient_ring(self.phi_n)
-        self.S2 = self.ring_mod_2.quotient_ring(self.phi_n)
-
-    def mod_centered(self, v, modulo):
-        v = int(v) % modulo
-        if v <= modulo // 2:
-            return v
-        return - (modulo - v)
-
-    def from_S3_to_Rq(self, poly):
-        return self.Rq([self.mod_centered(c, 3) for c in poly])
-
-    def generate_ternary_coefficients(self, xof, max_degree):
-        return [choice([-1, 0, 1]) for _ in range(max_degree + 1)]
-
-    def generate_ternary_coefficients_for_d(self, xof, d, max_degree):
-        assert d % 2 == 0
-        coeffs = [0] * (max_degree + 1)
-        supp = xof_sample_k_indexes(xof, max_degree + 1, d)
-        for i in range(d // 2):
-            coeffs[supp[i]] = 1
-            coeffs[supp[d//2 + i]] = -1
-
-        return coeffs
+        self.__init_rings()
 
     def centered(self, polynomial):
         modulo = polynomial.base_ring().order()
-        return [self.mod_centered(c, modulo) for c in polynomial]
+
+        def mod_centered(v):
+            v = int(v) % modulo
+            if v <= modulo // 2:
+                return v
+            return - (modulo - v)
+
+        return [mod_centered(c) for c in polynomial]
+
+    def to_Rq(self, polynomial):
+        return self.Rq(self.centered(polynomial))
+
+    def to_Sq(self, polynomial):
+        return self.Sq(self.centered(polynomial))
+
+    def to_S3(self, polynomial):
+        return self.S3(self.centered(polynomial))
+
+    def to_S2(self, polynomial):
+        return self.S2(self.centered(polynomial))
 
     def Rq_inverse(self, a):
         assert is_power_of_two(self.params.q)
 
-        v0 = self.centered(self.S2(list(a)).inverse())
+        v0 = self.centered(self.to_S2(a).inverse())
         t = 1
         while t < log(self.params.q, 2):
             v0_in_Rq = self.Rq(v0)
@@ -77,20 +74,23 @@ class NTRU_DPKE_OWCPA:
 
         return self.Rq(v0)
 
-    def to_Rq(self, polynomial):
-        return self.Rq(self.centered(polynomial))
+    def gen_ternary_coeffs(self, xof):
+        return [choice([-1, 0, 1]) for _ in range(self.params.max_degree_t + 1)]
 
-    def from_Rq_to_Sq(self, poly):
-        return self.Sq(self.centered(poly.mod(self.phi_1)))
+    def gen_ternary_coeffs_for_d(self, xof, d):
+        assert d % 2 == 0
+        coeffs = [0] * (self.params.max_degree_t + 1)
+        supp = xof_sample_k_indexes(xof, self.params.max_degree_t + 1, d)
+        for i in range(d // 2):
+            coeffs[supp[i]] = 1
+            coeffs[supp[d//2 + i]] = -1
 
-    def from_Rq_to_S3(self, poly):
-        return self.S3(self.centered(from_Rq_to_Sq(poly)))
+        return coeffs
 
     def keygen(self, randomness):
         xof = SHAKE256.new(randomness)
-        f_in_s3 = self.S3(self.generate_ternary_coefficients(xof, self.params.n - 2))
-        g_in_s3 = self.S3(self.generate_ternary_coefficients_for_d(xof, self.params.d,
-                                                                   self.params.n - 2))
+        f_in_s3 = self.S3(self.gen_ternary_coeffs(xof))
+        g_in_s3 = self.S3(self.gen_ternary_coeffs_for_d(xof, self.params.d))
         f_inv_3 = f_in_s3.inverse()
 
         f = self.to_Rq(f_in_s3)
@@ -104,10 +104,8 @@ class NTRU_DPKE_OWCPA:
     def sample_plaintext(self, randomness):
         xof = SHAKE256.new(randomness)
 
-        r = self.generate_ternary_coefficients(xof, self.params.n - 2)
-        m = self.generate_ternary_coefficients_for_d(xof,
-                                                    self.params.d,
-                                                    self.params.n - 2)
+        r = self.gen_ternary_coeffs(xof)
+        m = self.gen_ternary_coeffs_for_d(xof, self.params.d)
         return r, m
 
     def encrypt(self, pk, plaintext):
@@ -138,12 +136,12 @@ class NTRU_DPKE_OWCPA:
             return None
 
         a = (c * self.to_Rq(f))
-        m = self.S3(self.centered(a)) * f_inv_3
+        m = self.to_S3(a) * f_inv_3
 
-        r = (c - self.from_S3_to_Rq(m)) * h_inv_q
+        r = (c - self.to_Rq(m)) * h_inv_q
 
         m = self.centered(m)
-        r = self.centered(self.from_Rq_to_Sq(r))
+        r = self.centered(self.to_Sq(r))
 
         if self.is_valid_plaintext(r, m):
             return r, m
