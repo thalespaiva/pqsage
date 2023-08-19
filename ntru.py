@@ -62,17 +62,18 @@ class NTRU_DPKE_OWCPA:
     def to_S2(self, polynomial):
         return self.S2(self.centered(polynomial))
 
-    def Rq_inverse(self, a):
+    def Sq_inverse(self, a):
         assert is_power_of_two(self.params.q)
 
-        v0 = self.centered(self.to_S2(a).inverse())
+        a_in_Sq = self.to_Sq(a)
+        v0 = self.to_Sq(self.to_S2(a).inverse())
         t = 1
         while t < log(self.params.q, 2):
-            v0_in_Rq = self.Rq(v0)
-            v0 = self.centered(v0_in_Rq * (2 - a * v0_in_Rq))
+            v0 = v0 * (2 - a_in_Sq * v0)
             t = 2*t
+        assert (v0 * a_in_Sq) == 1
 
-        return self.Rq(v0)
+        return v0
 
     def gen_ternary_coeffs(self, xof):
         return [choice([-1, 0, 1]) for _ in range(self.params.max_degree_t + 1)]
@@ -96,8 +97,8 @@ class NTRU_DPKE_OWCPA:
         f = self.to_Rq(f_in_s3)
         g = self.to_Rq(g_in_s3)
 
-        h = 3 * g * self.Rq_inverse(f)
-        h_inv_q = self.Rq_inverse(h)
+        h = 3 * g * self.to_Rq(self.Sq_inverse(f))
+        h_inv_q = self.to_Rq(self.Sq_inverse(h))
 
         return h, (f, f_inv_3, h_inv_q)
 
