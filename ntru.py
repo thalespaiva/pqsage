@@ -33,7 +33,6 @@ class NTRU_DPKE_OWCPA:
         self.Sq = ring_mod_q.quotient_ring(phi_n)
         self.S3 = ring_mod_q.change_ring(Integers(3)).quotient(phi_n)
         self.S2 = ring_mod_q.change_ring(Integers(2)).quotient(phi_n)
-        self.phi_1 = phi_1
 
     def __init__(self, security_level):
         self.params = self.SecurityParameters[security_level]
@@ -94,11 +93,11 @@ class NTRU_DPKE_OWCPA:
         g_in_s3 = self.S3(self.gen_ternary_coeffs_for_d(xof, self.params.d))
         f_inv_3 = f_in_s3.inverse()
 
-        f = self.to_Rq(f_in_s3)
+        f = self.to_Sq(f_in_s3)
         g = self.to_Rq(g_in_s3)
 
         h = 3 * g * self.to_Rq(self.Sq_inverse(f))
-        h_inv_q = self.to_Rq(self.Sq_inverse(h))
+        h_inv_q = self.Sq_inverse(h)
 
         return h, (f, f_inv_3, h_inv_q)
 
@@ -133,13 +132,12 @@ class NTRU_DPKE_OWCPA:
         (f, f_inv_3, h_inv_q) = sk
         c = ciphertext
 
-        if c.lift().mod(self.phi_1) != 0:
+        if sum(c) != 0:
             return None
 
-        a = (c * self.to_Rq(f))
+        a = (self.to_Sq(c) * self.to_Sq(f))
         m = self.to_S3(a) * f_inv_3
-
-        r = (c - self.to_Rq(m)) * h_inv_q
+        r = (self.to_Sq(c) - self.to_Sq(m)) * h_inv_q
 
         m = self.centered(m)
         r = self.centered(self.to_Sq(r))
